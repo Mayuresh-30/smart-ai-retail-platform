@@ -6,7 +6,7 @@ This document records what exists in the backend today, how its pieces work toge
 
 Version 1 is for a shop owner to manage one shop, its products, categories, and saved customers; create bills; update stock after sales; and review sales and bill history. Saved customer management remains part of Version 1. Billing should support both a saved customer and a walk-in bill, as described in the business requirements.
 
-The backend currently provides owner and shop REST APIs, plus customer service logic. Product, category, billing, inventory, analytics, authentication, and frontend flows are not implemented yet. The customer service does not yet have a REST controller, so customer operations are not currently exposed as HTTP endpoints.
+The backend currently provides owner, shop, and customer REST APIs. Product, category, billing, inventory, analytics, authentication, and frontend flows are not implemented yet.
 
 ## 2. What is built today
 
@@ -19,7 +19,7 @@ The backend currently provides owner and shop REST APIs, plus customer service l
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/config/SecurityConfig.java` | Configures BCrypt password encoding and the current Spring Security filter chain. Requests are presently permitted without authentication; this is not the final JWT security design. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/common/shared/BaseEntity.java` | Shared ID, `createdAt`, and `updatedAt` fields inherited by entities. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/common/response/ApiResponse.java` | Common API response envelope: success flag, message, data, and timestamp. |
-| `backend/src/main/java/com/smart_ai_retail_platform/backend/common/exception/GlobalExceptionHandler.java` | Maps selected application exceptions to common API responses. Extend it as modules add error cases. |
+| `backend/src/main/java/com/smart_ai_retail_platform/backend/common/exception/GlobalExceptionHandler.java` | Maps missing resources to 404, duplicate/conflicting states to 409, and Bean Validation/constraint failures to 400 using the common API response envelope. Add mappings as new modules define expected errors. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/common/exception/ResourceNotFoundException.java` | General missing-resource exception. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/common/exception/ResourceAlreadyExistsException.java` | General duplicate/conflict exception. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/common/exception/ShopNotFoundException.java` | Shop-specific missing-resource exception. |
@@ -63,6 +63,7 @@ The backend currently provides owner and shop REST APIs, plus customer service l
 | File | Purpose |
 |---|---|
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/entity/Customer.java` | Saved customer entity belonging to a shop; includes name, phone, and active status. |
+| `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/controller/CustomerController.java` | Shop-scoped REST API for customer create, get, paginated list/search, update, activate, and deactivate operations under `/api/shops/{shopId}/customers`. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/service/CustomerService.java` | Declares customer create, get, paginated list, search, update, activate, and deactivate operations. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/service/impl/CustomerServiceImpl.java` | Implements those operations, scopes reads to a shop, and uses active/inactive status rather than deleting customers. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/repository/CustomerRepository.java` | JPA persistence, shop-scoped lookups and paging, and search by customer name or phone. |
@@ -70,8 +71,6 @@ The backend currently provides owner and shop REST APIs, plus customer service l
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/dto/CustomerRequest.java` | Validated input for creating a saved customer. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/dto/CustomerUpdateRequest.java` | Validated input for editing customer details. |
 | `backend/src/main/java/com/smart_ai_retail_platform/backend/customer/dto/CustomerResponse.java` | Customer data returned by customer use cases. |
-
-There is currently no `customer/controller` implementation. The service interface has endpoint ideas in comments, but those comments are not working routes. Build the controller and connect it to the frontend when exposing customer management.
 
 ### Configuration and tests
 
@@ -82,11 +81,12 @@ There is currently no `customer/controller` implementation. The service interfac
 | `backend/src/main/resources/application-test.yml` | H2 in-memory database settings for tests. |
 | `backend/src/main/resources/application-prod.yml` | Production profile configuration; review and complete its environment-specific settings before deployment. |
 | `backend/src/test/java/com/smart_ai_retail_platform/backend/BackendApplicationTests.java` | Basic application context loading test. |
+| `backend/src/test/java/com/smart_ai_retail_platform/backend/customer/controller/CustomerControllerTest.java` | H2-backed MockMvc integration tests for customer create, list/search pagination, get, update, activate/deactivate, validation errors, missing resources, and shop scoping. Test data rolls back after each test. |
 | `backend/src/test/java/com/smart_ai_retail_platform/backend/owner/service/OwnerServiceTest.java` | Spring integration test that checks owner audit timestamps on creation. |
 
 ## 3. How the current request flow works
 
-For owner and shop operations, the implemented flow is:
+For owner, shop, and customer operations, the implemented flow is:
 
 1. A REST controller receives a request and validates its DTO with Bean Validation.
 2. The controller calls a service interface; the service implementation applies business rules inside a transaction.
@@ -95,7 +95,7 @@ For owner and shop operations, the implemented flow is:
 5. The controller returns an `ApiResponse` with an appropriate HTTP status.
 6. Exceptions are intended to be converted into consistent error responses by `GlobalExceptionHandler`.
 
-Customer operations currently start at the service layer because there is no customer REST controller. Shop-scoped customer methods check that the customer belongs to the requested shop, and list/search methods use Spring Data pagination.
+Customer routes are rooted at `/api/shops/{shopId}/customers`. The collection GET lists customers by page, and accepts an optional `query` parameter to search by name or phone. Individual reads and changes pass both shop and customer IDs into the service, which scopes customer access to that shop. Activate/deactivate are state transitions rather than hard deletion. The controller tests use MockMvc and the H2 `test` profile to verify the HTTP contract without relying on local MySQL data.
 
 ## 4. Current domain relationships
 
@@ -110,14 +110,13 @@ Product, Category, Bill, BillItem, payment, and inventory entities and relations
 
 Recommended sequence, preserving the modular monolith boundaries:
 
-1. **Stabilize the foundation:** review profile configuration and secret handling; complete consistent exception responses and validation; ensure owner/shop/customer use cases have the intended tests. Replace the temporary test endpoint when appropriate.
-2. **Finish customer API:** add a customer controller for shop-scoped create, get, list, search, update, activate, and deactivate operations. Apply paging and validation at the API boundary.
-3. **Build Category:** create entity, DTOs, mapper, repository, service, controller, and tests; enforce category-name uniqueness within a shop.
-4. **Build Product and inventory fields:** add shop/category relationships, validated prices and quantities, search/filter/pagination, and safe stock updates.
-5. **Build Billing:** add Bill and BillItem domain objects, checkout endpoints and services, CASH/UPI payment selection, optional saved-customer association for walk-ins, and immutable bill history. Persist a bill and reduce stock atomically; reject checkout when stock is insufficient. Keep bill item descriptions/prices as sale-time snapshots so later product edits do not rewrite past bills.
-6. **Build bill history and Dashboard:** add date/customer/number filters and pagination for bills, then aggregate revenue, bill counts, low stock, best sellers, and recent bills.
-7. **Add authentication and authorization:** implement the documented owner registration/login/JWT behavior and restrict shop data to the authenticated owner. The current security config permits all requests and does not satisfy this requirement.
-8. **Connect the frontend:** build the responsive owner workflow against the backend APIs after their request/response contracts are defined.
+1. **Stabilize the foundation:** review profile configuration and secret handling; keep exception responses consistent as modules add errors. Replace the temporary test endpoint when appropriate.
+2. **Build Category:** create entity, DTOs, mapper, repository, service, controller, and tests; enforce category-name uniqueness within a shop.
+3. **Build Product and inventory fields:** add shop/category relationships, validated prices and quantities, search/filter/pagination, and safe stock updates.
+4. **Build Billing:** add Bill and BillItem domain objects, checkout endpoints and services, CASH/UPI payment selection, optional saved-customer association for walk-ins, and immutable bill history. Persist a bill and reduce stock atomically; reject checkout when stock is insufficient. Keep bill descriptions/prices as sale-time snapshots so later product edits do not rewrite past bills.
+5. **Build bill history and Dashboard:** add date/customer/number filters and pagination for bills, then aggregate revenue, bill counts, low stock, best sellers, and recent bills.
+6. **Add authentication and authorization:** implement the documented owner registration/login/JWT behavior and restrict shop data to the authenticated owner. The current security config permits all requests and does not satisfy this requirement.
+7. **Connect the frontend:** build the responsive owner workflow against the backend APIs after their request/response contracts are defined.
 
 AI recommendations and forecasting are later roadmap work, not a prerequisite for the Version 1 retail workflow.
 
